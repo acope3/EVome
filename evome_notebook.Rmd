@@ -15,10 +15,8 @@ library(tidyverse)
 require(reshape2)
 library(preprocessCore)
 library(DEP)
-library(gplots)
 library(limma)
 library(clusterProfiler)
-library(topGO)
 
 
 nsaf <- function(spec.counts)
@@ -244,7 +242,7 @@ plot_detect(data_se)
 
 
 
-Based on the above plot, it appears that most of the missing values are from low abundant proteins. Here, we will use the QRILIC method of data imputation.
+Based on the above plot, it appears that most of the missing values are from low abundant proteins. Here, we will use the QRILIC method of data imputation. We will set a random seed to increase reproducibility.
 
 ```{r check_missing,echo = FALSE,warning=F,message=FALSE}
 set.seed(400)
@@ -252,16 +250,7 @@ data_imp <- DEP::impute(data_se,fun = "QRILC")
 plot_imputation(data_imp)
 ```
 
-
-
-
-
-
-
-
-
-
-DEP log2 transforms the values and then imputes. We will use this matrix as input into limma for comparing protein abundances between the Heavy and Light fractions of EVs. We note that one check that the data fits limma's assumptions is that variance is a monotonically decreasing function of average expression. We can check this assumption. 
+DEP log2 transforms the values and then imputes. We will use this matrix as input into limma for comparing protein abundances between the Heavy and Light fractions of EVs.
 
 ```{r check_limma,echo = FALSE,warning=F,message=FALSE,fig.width=6,fig.height=7}
 
@@ -314,16 +303,18 @@ fit.ev.w.weights <- eBayes(fit.ev.w.weights,robust = T,trend=T)
 
 plotSA(fit.ev.w.weights)
 diff.exp.w.weights<- topTable(fit.ev.w.weights,number = nrow(caeel.nsaf.log.imp.filt))
-diff.exp.top.w.weights<- diff.exp.w.weights[which(abs(diff.exp.w.weights$logFC) >= 1.5 & diff.exp.w.weights$adj.P.Val < 0.05),]
+#diff.exp.top.w.weights<- diff.exp.w.weights[which(abs(diff.exp.w.weights$logFC) >= 1.5 & diff.exp.w.weights$adj.P.Val < 0.05),]
+diff.exp.top.w.weights<- diff.exp.w.weights %>% filter(abs(logFC) >= 1.5 & adj.P.Val < 0.05) %>% rownames_to_column("Protein")
 
-diff.exp.top.w.weights <- merge(diff.exp.top.w.weights,caeel.nsaf,by=0)
-volcanoplot(fit.ev.w.weights,highlight = nrow(diff.exp.top.w.weights),names=rownames(diff.exp.top.w.weights))
+
+#diff.exp.top.w.weights <- merge(diff.exp.top.w.weights,caeel.nsaf,by=0)
+diff.exp.top.w.weights <- diff.exp.top.w.weights %>% left_join(caeel.nsaf.batch,by="Protein")
+
 ```
 
-Based on the limma analysis, we detect 295 genes with an absolute log2 fold change of at least 1.5 and adjusted p-value < 0.05 out of the 1016 proteins. Now let's perform a KEGG enrichment of the genes which appear differentially between the heavy and light strains. 
+Based on the limma analysis, we detect 234 genes with an absolute log2 fold change of at least 1.5 and adjusted p-value < 0.05 out of the 836 proteins, following filtering. Now let's perform a KEGG enrichment of the genes which appear differentially between the heavy and light strains. 
 
 ```{r echo=F}
-
 
 gene.to.kegg <- read_tsv("Data/ID_map/bioDBnet_db2db_2021_09_01.txt",col_types = cols())
 kegg.to.gene <- read_tsv("Data/ID_map/bioDBnet_db2db_2021_09_01.txt",col_types = cols())
@@ -338,10 +329,13 @@ gene.to.kegg[which(gene.to.kegg$KEGG_Gene_ID== "-"),"KEGG_Gene_ID"] <- paste0("C
 
 gene.to.kegg <- gene.to.kegg %>% mutate(KEGG_Gene_ID=str_remove(KEGG_Gene_ID,"cel:"))
 
+gene.universe <- gene.to.kegg[rownames(caeel.unique.sc),"KEGG_Gene_ID"]
 
-diff.exp.kegg.ids <- gene.to.kegg[diff.exp.top.w.weights$Row.names,1]
+
+## Enrichment of differentially expressed proteins regardless if it is up-regulated in Heavy or Light EVs. Also include proteins unique to one of the EVs
+
+diff.exp.kegg.ids <- gene.to.kegg[diff.exp.top.w.weights$Protein,"KEGG_Gene_ID"]
 diff.exp.kegg.ids <- c(diff.exp.kegg.ids,only.heavy,only.light)
-gene.universe <- gene.to.kegg[rownames(caeel.unique.sc),1]
 
 enrichment <- enrichKEGG(diff.exp.kegg.ids,organism = "cel",pvalueCutoff = 0.05,pAdjustMethod = "BH",qvalueCutoff = 0.1,universe = gene.universe)
 
@@ -354,10 +348,11 @@ enrichment@result$Gene_name <- unlist(lapply(str_split(enrichment@result$geneID,
 
 write_tsv(enrichment@result,"Results/differentially_expressed_kegg_enrichment_20210901.tsv")
 
-diff.exp.kegg.ids <- gene.to.kegg[diff.exp.top.w.weights[which(diff.exp.top.w.weights$logFC > 0),"Row.names"],1]
+## Enrichment of differentially expressed proteins up-regulated in Heavy EVs. Also include proteins unique to Heavy EVs.
+
+diff.exp.kegg.ids <- gene.to.kegg[diff.exp.top.w.weights[which(diff.exp.top.w.weights$logFC > 0),"Protein"],"KEGG_Gene_ID"]
 only.heavy.kegg <- gene.to.kegg[only.heavy,"KEGG_Gene_ID"]
 heavy.kegg <- c(only.heavy.kegg,diff.exp.kegg.ids)
-#heavy.kegg <- c(diff.exp.kegg.ids)
 heavy.enrichment <- enrichKEGG(heavy.kegg,organism = "cel",pvalueCutoff = 0.05,pAdjustMethod = "BH",qvalueCutoff = 0.1,universe = gene.universe)
 
 heavy.enrichment@result$Gene_name <- unlist(lapply(str_split(heavy.enrichment@result$geneID,"/"),function(x){
@@ -369,11 +364,11 @@ heavy.enrichment@result$Gene_name <- unlist(lapply(str_split(heavy.enrichment@re
 
 write_tsv(heavy.enrichment@result,"Results/heavy_fraction_upregulated_kegg_enrichment_20210901.tsv")
 
+## Enrichment of differentially expressed proteins up-regulated in Light EVs. Also include proteins unique to Light EVs.
 
-diff.exp.kegg.ids <- gene.to.kegg[diff.exp.top.w.weights[which(diff.exp.top.w.weights$logFC < 0),"Row.names"],1]
+diff.exp.kegg.ids <- gene.to.kegg[diff.exp.top.w.weights[which(diff.exp.top.w.weights$logFC < 0),"Protein"],"KEGG_Gene_ID"]
 only.light.kegg <- gene.to.kegg[only.light,"KEGG_Gene_ID"]
 light.kegg <- c(only.light.kegg,diff.exp.kegg.ids)
-
 light.enrichment <- enrichKEGG(light.kegg,organism = "cel",pvalueCutoff = 0.05,pAdjustMethod = "BH",qvalueCutoff = 0.1,universe = gene.universe)
 
 light.enrichment@result$Gene_name <- unlist(lapply(str_split(light.enrichment@result$geneID,"/"),function(x){
@@ -383,11 +378,21 @@ light.enrichment@result$Gene_name <- unlist(lapply(str_split(light.enrichment@re
         }
   ))
 
-write.table(light.enrichment@result,"Results/light_fraction_upregulated_kegg_enrichment_20210901.tsv",sep="\t",col.names=T,row.names=F,quote=F)
+write_tsv(light.enrichment@result,"Results/light_fraction_upregulated_kegg_enrichment_20210901.tsv")
+
+
+## Enrichment of EV proteins relative to genomic background.
 
 all <- gene.to.kegg[rownames(caeel.nsaf),"KEGG_Gene_ID"]
 all.enrichment <- enrichKEGG(all,organism = "cel",pvalueCutoff = 0.05,pAdjustMethod = "BH",qvalueCutoff = 0.1)
-write.table(all.enrichment@result,"Results/evome_vs_background_kegg_enrichment_20210901.tsv",sep="\t",col.names=T,row.names=F,quote=F)
+all.enrichment@result$Gene_name <- unlist(lapply(str_split(all.enrichment@result$geneID,"/"),function(x){
+         tmp <- kegg.to.gene[x,"Gene_Symbol"]
+         tmp[which(is.na(tmp))] <- str_remove(x[which(is.na(tmp))],"CELE_")
+         paste(tmp,collapse=",")
+        }
+  ))
+
+write_tsv(all.enrichment@result,"Results/evome_vs_background_kegg_enrichment_20210901.tsv")
 
 
 ```
