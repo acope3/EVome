@@ -6,12 +6,17 @@ BiocManager::install(version = "3.11")
 library("tidyverse")
 library("plyr")
 library("qdap")
-library("stringr")
 library("DataCombine")
-library("ggplot2")
 library("gplots")
+library("VennDiagram")
+library("limma")
+library("UniprotR")
+library("PerformanceAnalytics")
+library("ggfortify")
+library("ggrepel")
 
-getwd()
+
+
 setwd("/Users/Inna/Documents/Barr lab/EV proteomics/Combined peptide identification")
 
 raw_peptides<-read.csv("raw_peptide_table.csv")
@@ -73,7 +78,6 @@ for (i in 1:length(CAEEL_tofind)) {
   names(CAEEL_L)[i] <- paste0(CAEEL_tofind[i])
   
 }
-head(CAEEL_L)
 
 
 #Locate peptide sequences in the E. coli proteome
@@ -85,7 +89,7 @@ for (i in 1:length(ECOLI_tofind)) {
   names(ECOLI_L)[i] <- paste0(ECOLI_tofind[i])
   
 }
-head(ECOLI_L)
+
 
 #generate empty lists to use in the loops below
 CAEEL_L2<-list()
@@ -105,7 +109,7 @@ for (i in 1:length(CAEEL_L)) {
   
   
 }
-head(CAEEL_L2,20)
+
 
 CAEEL_all_possible_proteins<-unique(unlist(CAEEL_L2))
 write.csv(CAEEL_all_possible_proteins, "CAEEL_all_possible_proteins.csv")
@@ -124,7 +128,7 @@ for (i in 1:length(ECOLI_L)) {
   ECOLI_L2<-lappend(ECOLI_L2, temp_vector)
   
 }
-head(ECOLI_L2,20)
+
 
 ECOLI_all_possible_proteins<-unique(unlist(ECOLI_L2))
 write.csv(ECOLI_all_possible_proteins, "ECOLI_all_possible_proteins.csv")
@@ -143,10 +147,7 @@ for (i in (1:length(CAEEL_L2))) {
   CAEEL_name_strings<-append(CAEEL_name_strings, m)
 }
 
-head(CAEEL_name_strings)
-head(CAEEL_peptide_frequencies)
-length(CAEEL_name_strings)
-length(CAEEL_peptide_frequencies$Freq)
+
 
 for (i in (1:length(ECOLI_L2))) {
   
@@ -155,10 +156,7 @@ for (i in (1:length(ECOLI_L2))) {
   ECOLI_name_strings<-append(ECOLI_name_strings, m)
 }
 
-head(ECOLI_name_strings)
-head(ECOLI_peptide_frequencies)
-length(ECOLI_name_strings)
-length(ECOLI_peptide_frequencies$Freq)
+
 
 #Compile a table of all identified peptides with gene names
 CAEEL_peptides_remapped <- data.frame(Peptide_sequence=CAEEL_peptide_frequencies$CAEEL_identified_peptides, 
@@ -186,8 +184,7 @@ write.csv(ECOLI_raw_peptides2, file="ECOLI_raw_peptides2.csv")
 #Subsetting only peptides that are mapped to one protein
 CAEEL_uniquely_mapped <- grepl.sub(data = CAEEL_peptides_remapped, pattern = ",", 
                                    Var = "Gene_names", keep.found=FALSE)
-head(CAEEL_uniquely_mapped,30)
-length(CAEEL_uniquely_mapped$Peptide_sequence)
+
 N_CAEEL_uniquely_mapping_peptides <- length(CAEEL_uniquely_mapped$Peptide_sequence)
 N_CAEEL_unique_proteins <- length(unique(CAEEL_uniquely_mapped$Gene_names))
 write.csv(CAEEL_uniquely_mapped, "CAEEL_uniquely_mapped.csv")
@@ -201,8 +198,7 @@ write.csv(CAEEL_nonuniquely_mapped, "CAEEL_nonuniquely_mapped.csv")
 
 ECOLI_uniquely_mapped <- grepl.sub(data = ECOLI_peptides_remapped, pattern = ",", 
                                    Var = "Gene_names", keep.found=FALSE)
-head(ECOLI_uniquely_mapped,30)
-length(ECOLI_uniquely_mapped$Peptide_sequence)
+
 N_ECOLI_uniquely_mapping_peptides <- length(ECOLI_uniquely_mapped$Peptide_sequence)
 N_ECOLI_unique_proteins <- length(unique(ECOLI_uniquely_mapped$Gene_names))
 
@@ -216,22 +212,22 @@ write.csv(ECOLI_nonuniquely_mapped, "ECOLI_nonuniquely_mapped.csv")
 CAEEL_genes_with_unique_peptide_counts <- aggregate(CAEEL_uniquely_mapped$Peptide_count, 
                                       by = list(Category=CAEEL_uniquely_mapped$Gene_names), 
                                       FUN=sum)
-head(CAEEL_genes_with_unique_peptide_counts)
+
 
 write.csv(CAEEL_genes_with_unique_peptide_counts, "CAEEL_genes_with_unique_peptide_counts.csv")
 
 ECOLI_genes_with_unique_peptide_counts <- aggregate(ECOLI_uniquely_mapped$Peptide_count, 
                                                     by = list(Category=ECOLI_uniquely_mapped$Gene_names), 
                                                     FUN=sum)
-head(ECOLI_genes_with_unique_peptide_counts)
+
 
 write.csv(ECOLI_genes_with_unique_peptide_counts, "ECOLI_genes_with_unique_peptide_counts.csv")
 
 #Figuring out genes that were identified only by nonuniquely mapped peptides
 
 CAAEL_nonunique <- unlist(strsplit(CAEEL_nonuniquely_mapped$Gene_names, split=", "))
-head(CAAEL_nonunique,5)
-length(unique(CAAEL_nonunique))
+
+
 CAAEL_nonunique<-unique(CAAEL_nonunique)
 write.csv(CAAEL_nonunique, "CAAEL_nonunique.csv")
 
@@ -437,12 +433,12 @@ write.csv(ECOLI_summary, "ECOLI_Proteomics_summary.csv")
 CAEEL_summary_with_uniprot <- merge (CAEEL_summary, DB_uniprot_cds_genes[,c("external_gene_name","uniprot" )],
                                      by.x = "Gene_name", by.y = "external_gene_name",
                                      all.x=TRUE, all.y=FALSE)
-head(CAEEL_summary_with_uniprot,40)
+
 write.csv(CAEEL_summary_with_uniprot, "CAEEL_summary_with_uniprot.csv")
 
-help(ConstructGenesTree)
+
 GetNamesTaxa()
-library("UniprotR")
+
 GetProteomeFasta(UP000001940,
                  directorypath = "/Users/Inna/Documents/Barr lab/EV proteomics/Combined peptide identification")
 
@@ -450,7 +446,7 @@ Uniprot_proteome <- read.delim("uniprot-proteome_UP000001940.tab", stringsAsFact
 #---------------------------------------------------------------
 
 #Principal Component Analysis
-library("ggfortify")
+
 tCAEEL_summary <- as.data.frame(t(CAEEL_summary[2:15]))
 
 tCAEEL_summary$sample_type <- c("Light", "Heavy", "Light","Heavy",
@@ -480,7 +476,7 @@ ggsave("ECOLI_PCA_plot.pdf", p2, width=4, height=4,
        device = "pdf", units = "in")
 
 #Correlation plots
-library("PerformanceAnalytics")
+
 
 chart.Correlation(log10(CAEEL_summary[2:15]+1),
                   method="pearson",
@@ -490,7 +486,7 @@ chart.Correlation(log10(CAEEL_summary[2:15]+1),
 #--------------------------------------------
 #Saturation test attempt for C.elegans
 
-library("gplots")
+
 
 CAEEL_venn_vector_list <- list(CAEEL_df_bygene_unique_peptide_counts_05$Group.1,
                       CAEEL_df_bygene_unique_peptide_counts_04$Group.1,
@@ -531,8 +527,6 @@ colnames(CAEEL_df_saturation)<-c("Consequtive_sample", "Cumulative_newly_discove
 CAEEL_df_saturation
 
 #Plotting saturation graphs for C. elegans
-library ("ggplot2")
-library("ggrepel")
 
 p1 <-  ggplot(CAEEL_df_saturation, aes(x=Consequtive_sample, y=Cumulative_newly_discovered_proteins))+ 
   geom_point(color="black", shape=16, size=2)+
@@ -605,8 +599,6 @@ colnames(ECOLI_df_saturation)<-c("Consequtive_sample", "Cumulative_newly_discove
 ECOLI_df_saturation
 
 #Plotting saturation graphs for E. coli
-library ("ggplot2")
-library("ggrepel")
 
 p1 <-  ggplot(ECOLI_df_saturation, aes(x=Consequtive_sample, y=Cumulative_newly_discovered_proteins))+ 
   geom_point(color="black", shape=16, size=2)+
@@ -632,12 +624,6 @@ ggsave("ECOLI_saturation_cumulative_heavy_first.pdf", p1, width=4, height=4,
 
 
   
-library("VennDiagram")
-
-if (!requireNamespace("BiocManager", quietly = TRUE))
-  install.packages("BiocManager")
-BiocManager::install("limma")
-library("limma")
 
 vennDiagram(vennCounts(cbind(CAEEL_df_unique_proteins_01$Gene_names, 
                             CAEEL_df_unique_proteins_02$Gene_names)))
