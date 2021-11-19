@@ -10,14 +10,13 @@ output:
 ```{r setup, include=FALSE,message=FALSE,warning=F,echo=F}
 knitr::opts_chunk$set(echo = FALSE)
 
-
 library(tidyverse)
 require(reshape2)
 library(preprocessCore)
 library(DEP)
 library(limma)
 library(clusterProfiler)
-
+library(cowplot)
 
 nsaf <- function(spec.counts)
 {
@@ -43,16 +42,16 @@ filterByBioRep <- function(df)
     return(df)
   }
 }
-
-
-
 ```
 
+I'm going to drop the Mixed sample for our data. Although Inna found that it was closer to Heavy EVs, it still could be considered its own group without any replicates. We have N=3 biological replicates for Heavy and Light EVs, which is the minimum we should have for differential expression analysis. 
 
-I'm going to drop the Mixed sample for our data. Although Inna found that it was closer to Heavy EVs, it still could be considered its own group without any replicates. We have N=3 biological replicates for Heavy and Light EVs, which is the minimum we need to do a differential expression analysis. 
+Our data consists of multiple measurements taken on different instruments (Orbitrap, Eclipse) and on different days. This likely results in batch effects, which can reduce our signal of differential expression between the heavy and light fractions. Using the unique spectral counts values, let's cluster the different measurements to assess if we have a possible batch effect.
 
-The first thing I'm going to do is convert spectral counts to NSAF, which is a within sample normalization that accounts for protein length and total number of spectral counts taken in the sample.
-```{r nsaf,echo = FALSE,warning=F,message=FALSE}
+For differential expression analysis, we will use unique spectral counts for each protein. Also, we have the option to calculate NSAF values. We will use limma on log-transformed unique spectral counts following batch-correction, filtering, normalization, and imputation.
+
+
+```{r data}
 caeel.unique.sc <- read_tsv("Data/Abundance/CAEEL_unique_countsbysample.tsv",col_types = cols())
 caeel.unique.sc <- caeel.unique.sc %>% column_to_rownames("Gene_name")
 caeel.unique.sc <- caeel.unique.sc %>% dplyr::select(-Mixed)
@@ -63,12 +62,12 @@ batch.block <- fct_collapse(colnames(caeel.unique.sc),"1"=c("Light_01.1","Heavy_
                               "2"=c("Light_02.2","Light_03.2","Heavy_02.2","Heavy_03.2"),
                               "3" = c("Light_04.3","Light_05.3","Light_06.3","Light_07.3","Heavy_04.3","Heavy_05.3","Heavy_06.3"))
 
+```
+
+```{r nsaf, warning=FALSE}
 gene.length <- read_tsv("Data/gene_length.tsv",col_types = cols())
 uniprot <- read_tsv("Data/Uniprot/uniprot-Caenorhabditis+elegans.tab",col_types = cols())
 uniprot <- uniprot %>% mutate(Gene_names_ORF = trimws(Gene_names_ORF))
-
-
-
 for (i in rownames(caeel.unique.sc))
 {
   prot.size <- gene.length[which(gene.length$Gene_name == i),"Length"]
@@ -82,29 +81,29 @@ for (i in rownames(caeel.unique.sc))
 }
 
 caeel.nsaf <- nsaf(caeel.unique.sc)
-
-
+caeel.unique.sc <- caeel.unique.sc %>% dplyr::select(-Length)
 ```
 
-Our data consists of multiple measurements taken on different instruments (Orbitrap, Eclipse) and on different days. This is begging for possible batch effects, which can reduce our signal of differential expression between the heavy and light fractions. Using the NSAF values, let's cluster the different measurements to assess if we have a possible batch effect.
+
+
 
 ```{r batch_check,echo = FALSE,warning=F,message=FALSE}
-uncorrected.hclust.nsaf <- hclust(dist(t(caeel.nsaf)))
+uncorrected.hclust <- hclust(dist(t(caeel.unique.sc)))
 
-plot(uncorrected.hclust.nsaf,xlab="Measurement",main="Before Batch Correction")
+plot(uncorrected.hclust,xlab="Measurement",main="Before Batch Correction")
 ```
 
 
 From the hierarchical clustering, it is Heavy_01 and Light_01 appear to be outliers, which is unsurprising given that they were measured on a different instrument. I'm going to apply the mean-centering correction method used in the Bioconductor package msmsEDA to reducte the batch effects. Note that the vignette for this tool states to treat missing values as 0. Question to investigate further: should we correct for batches before filtering (as done here) or after filtering of proteins with too many missing data points? 
 
 ```{r correct_batch,echo = FALSE,warning=F,message=FALSE}
-caeel.nsaf.batch <- as.data.frame(msmsEDA::batch.neutralize(as.matrix(caeel.nsaf),batch.block,half = T,sqrt.trans = T))
+caeel.sc.batch <- as.data.frame(msmsEDA::batch.neutralize(as.matrix(caeel.unique.sc),batch.block,half = T,sqrt.trans = T))
 
-corrected.hclust.nsaf <- hclust(dist(t(caeel.nsaf.batch)))
-plot(corrected.hclust.nsaf,xlab="Measurment",main="After Batch Correction")
+corrected.hclust <- hclust(dist(t(caeel.sc.batch)))
+plot(corrected.hclust,xlab="Measurment",main="After Batch Correction")
 
 
-write.table(caeel.nsaf.batch,"Data/Abundance/celegans_nsaf_batch_correction.tsv",sep="\t",row.names=T,col.names=T,quote=F)
+write.table(caeel.sc.batch,"Data/Abundance/celegans_sc_unique_batch_correction.tsv",sep="\t",row.names=T,col.names=T,quote=F)
 ```
 
 
@@ -115,13 +114,13 @@ Now that we've applied our batch corrections, let's filter proteins. For our dif
 ```{r filter,fig.width=12,echo = FALSE,warning=F,message=FALSE}
 
 ## Using the original matrix, note which values were originally missing
-caeel.nsaf.batch.na <- caeel.nsaf.batch
-caeel.nsaf.batch.na[caeel.nsaf == 0] <- NA
-caeel.nsaf.batch <- caeel.nsaf.batch %>% rownames_to_column("Protein")
-caeel.nsaf.batch.na <- caeel.nsaf.batch.na %>% rownames_to_column("Protein")
+caeel.sc.batch.na <- caeel.sc.batch
+caeel.sc.batch.na[caeel.unique.sc == 0] <- NA
+caeel.sc.batch <- caeel.sc.batch %>% rownames_to_column("Protein")
+caeel.sc.batch.na <- caeel.sc.batch.na %>% rownames_to_column("Protein")
 
-light.meas <- caeel.nsaf.batch.na %>% dplyr::select(Protein,contains("Light"))
-heavy.meas <- caeel.nsaf.batch.na %>% dplyr::select(Protein,contains("Heavy"))
+light.meas <- caeel.sc.batch.na %>% dplyr::select(Protein,contains("Light"))
+heavy.meas <- caeel.sc.batch.na %>% dplyr::select(Protein,contains("Heavy"))
 
 num.light <- ncol(light.meas) - 1
 num.heavy <- ncol(heavy.meas) - 1
@@ -146,12 +145,12 @@ only.light <- num.missing %>%
 
 light.or.heavy <- c(only.heavy,only.light)
 
-caeel.nsaf.filter <- caeel.nsaf.batch.na %>% filter(!Protein %in% light.or.heavy)
+caeel.sc.filter <- caeel.sc.batch.na %>% filter(!Protein %in% light.or.heavy)
 
 
-caeel.nsaf.long <- caeel.nsaf.filter %>% pivot_longer(-Protein,names_to="Measurement",values_to="Abundance")
+caeel.sc.long <- caeel.sc.filter %>% pivot_longer(-Protein,names_to="Measurement",values_to="Abundance")
 
-rep.by.sample <- fct_collapse(caeel.nsaf.long$Measurement,Light_1=c("Light_01.1"),
+rep.by.sample <- fct_collapse(caeel.sc.long$Measurement,Light_1=c("Light_01.1"),
                                   Light_2=c("Light_02.2","Light_03.2"),
                                   Light_3=c("Light_04.3","Light_05.3","Light_06.3","Light_07.3"),
                                   Heavy_1=c("Heavy_01.1"),
@@ -159,11 +158,11 @@ rep.by.sample <- fct_collapse(caeel.nsaf.long$Measurement,Light_1=c("Light_01.1"
                                   Heavy_3=c("Heavy_04.3","Heavy_05.3","Heavy_06.3"))
 
 
-caeel.nsaf.long <- caeel.nsaf.long %>% mutate(Bio.Sample =rep.by.sample)
+caeel.sc.long <- caeel.sc.long %>% mutate(Bio.Sample =rep.by.sample)
 
 
 ## Filter out proteins that are only observed in both the light and heavy samples 1 or fewer times
-non.na.per.sample.by.gene <- caeel.nsaf.long  %>% dplyr::group_by(Protein,Bio.Sample) %>% 
+non.na.per.sample.by.gene <- caeel.sc.long  %>% dplyr::group_by(Protein,Bio.Sample) %>% 
     summarise(non_na_count = sum(!is.na(Abundance))) %>% 
     group_split()
 enough.obs.list <- lapply(non.na.per.sample.by.gene ,filterByBioRep)
@@ -172,10 +171,10 @@ enough.obs.df <- enough.obs.list %>% bind_rows()
 prot.to.keep <- unique(enough.obs.df$Protein)
 
 
-caeel.nsaf.filter <- caeel.nsaf.filter %>% filter(Protein %in% prot.to.keep)
-caeel.nsaf.filter <- caeel.nsaf.filter %>% rowwise() %>% mutate(numNA = sum(is.na(c_across(where(is.numeric))))) 
+caeel.sc.filter <- caeel.sc.filter %>% filter(Protein %in% prot.to.keep)
+caeel.sc.filter <- caeel.sc.filter %>% rowwise() %>% mutate(numNA = sum(is.na(c_across(where(is.numeric))))) 
 
-caeel.nsaf.filter <- caeel.nsaf.filter %>%
+caeel.sc.filter <- caeel.sc.filter %>%
                      filter(numNA < 7) %>%
                      dplyr::select(-numNA)
 
@@ -186,31 +185,31 @@ After filtering, but before imputing, let's normalize our samples to make them m
 
 ```{r norm,,echo = FALSE,warning=F,message=FALSE}
 
-caeel.nsaf.filter <- caeel.nsaf.filter %>% column_to_rownames("Protein") 
-caeel.nsaf.filter.log2 <- log2(caeel.nsaf.filter)
-caeel.nsaf.filter.log2.long <- caeel.nsaf.filter.log2 %>% pivot_longer(everything(),names_to="Measurement",values_to="Abundance") 
+caeel.sc.filter <- caeel.sc.filter %>% column_to_rownames("Protein") 
+caeel.sc.filter.log2 <- log2(caeel.sc.filter)
+caeel.sc.filter.log2.long <- caeel.sc.filter.log2 %>% pivot_longer(everything(),names_to="Measurement",values_to="Abundance") 
 
-unnorm.boxplot <- ggplot(caeel.nsaf.filter.log2.long,aes(x=Measurement,y=Abundance)) + geom_boxplot() +
+unnorm.boxplot <- ggplot(caeel.sc.filter.log2.long,aes(x=Measurement,y=Abundance)) + geom_boxplot() +
                   xlab("Measurement") + 
-                  ylab("log2(NSAF)") +
-                  ggtitle("Log2(NSAF) Distribution Per Sample:\nBefore Normalization") +
+                  ylab("log2(Spectral Counts)") +
+                  ggtitle("Log2(Spectral Counts) Distribution Per Sample:\nBefore Normalization") +
                   theme_cowplot() +
                   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 unnorm.boxplot
 
 
-caeel.nsaf.norm <- normalize.quantiles(as.matrix(caeel.nsaf.filter))
-caeel.nsaf.norm <- as.data.frame(caeel.nsaf.norm,row.names = rownames(caeel.nsaf.filter))
-colnames(caeel.nsaf.norm) <- colnames(caeel.nsaf.filter)
-caeel.nsaf.norm.log2 <- log2(caeel.nsaf.norm)
-caeel.nsaf.norm.log2.long <- caeel.nsaf.norm.log2 %>% pivot_longer(everything(),names_to="Measurement",values_to="Abundance") 
+caeel.sc.norm <- normalize.quantiles(as.matrix(caeel.sc.filter))
+caeel.sc.norm <- as.data.frame(caeel.sc.norm,row.names = rownames(caeel.sc.filter))
+colnames(caeel.sc.norm) <- colnames(caeel.sc.filter)
+caeel.sc.norm.log2 <- log2(caeel.sc.norm)
+caeel.sc.norm.log2.long <- caeel.sc.norm.log2 %>% pivot_longer(everything(),names_to="Measurement",values_to="Abundance") 
 
 
 
-norm.boxplot <- ggplot(caeel.nsaf.norm.log2.long,aes(x=Measurement,y=Abundance)) + geom_boxplot() +
+norm.boxplot <- ggplot(caeel.sc.norm.log2.long,aes(x=Measurement,y=Abundance)) + geom_boxplot() +
                   xlab("Measurement") + 
-                  ylab("log2(NSAF)") +
-                  ggtitle("Log2(NSAF) Distribution Per Sample:\nAfter Normalization") +
+                  ylab("log2(Spectral Counts)") +
+                  ggtitle("Log2(Spectral Counts) Distribution Per Sample:\nAfter Normalization") +
                   theme_cowplot() +
                   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 norm.boxplot
@@ -221,20 +220,20 @@ norm.boxplot
 Next, we will impute missing values. In proteomics, missing values are often described as either missing at random or missing not at random. The latter refers to situation in which low abundant proteins are missing across samples. We can check if this is the case.
 
 ```{r check,echo = FALSE,warning=F,message=FALSE}
-treatment.by.sample <- fct_collapse(colnames(caeel.nsaf.norm),
+treatment.by.sample <- fct_collapse(colnames(caeel.sc.norm),
                               Light=c("Light_01.1","Light_02.2","Light_03.2","Light_04.3","Light_05.3","Light_06.3","Light_07.3"),
                                   Heavy=c("Heavy_01.1","Heavy_02.2","Heavy_03.2","Heavy_04.3","Heavy_05.3","Heavy_06.3"))
 
 
-colData <- data.frame(label=colnames(caeel.nsaf.norm),condition=treatment.by.sample,replicate=c(1,1,2,2,3,3,4,4,5,5,6,7,6),stringsAsFactors = F)
+colData <- data.frame(label=colnames(caeel.sc.norm),condition=treatment.by.sample,replicate=c(1,1,2,2,3,3,4,4,5,5,6,7,6),stringsAsFactors = F)
 colData$condition <- as.character(colData$condition)
 
-caeel.nsaf.norm.for.se <- caeel.nsaf.norm
+caeel.sc.norm.for.se <- caeel.sc.norm
 
-caeel.nsaf.norm.for.se$name <- rownames(caeel.nsaf.norm)
-caeel.nsaf.norm.for.se$ID <- rownames(caeel.nsaf.norm)
-caeel.nsaf.norm.for.se[is.na(caeel.nsaf.norm.for.se)] <- 0
-data_se <- DEP::make_se(as.data.frame(caeel.nsaf.norm.for.se),1:13,as.data.frame(colData))
+caeel.sc.norm.for.se$name <- rownames(caeel.sc.norm)
+caeel.sc.norm.for.se$ID <- rownames(caeel.sc.norm)
+caeel.sc.norm.for.se[is.na(caeel.sc.norm.for.se)] <- 0
+data_se <- DEP::make_se(as.data.frame(caeel.sc.norm.for.se),1:13,as.data.frame(colData))
 plot_frequency(data_se)
 plot_detect(data_se)
 
@@ -254,22 +253,23 @@ DEP log2 transforms the values and then imputes. We will use this matrix as inpu
 
 ```{r check_limma,echo = FALSE,warning=F,message=FALSE,fig.width=6,fig.height=7}
 
-caeel.nsaf.log.imp <- get_df_wide(data_imp)
-caeel.nsaf.log.imp.filt <- caeel.nsaf.log.imp[which(caeel.nsaf.log.imp$num_NAs < 14),]
+caeel.sc.log.imp <- get_df_wide(data_imp)
+caeel.sc.log.imp.filt <- caeel.sc.log.imp[which(caeel.sc.log.imp$num_NAs < 14),]
 
-rownames(caeel.nsaf.log.imp.filt) <- caeel.nsaf.log.imp.filt$name 
+rownames(caeel.sc.log.imp.filt) <- caeel.sc.log.imp.filt$name 
 
-caeel.nsaf.log.imp.filt<-(caeel.nsaf.log.imp.filt 
+caeel.sc.log.imp.filt<-(caeel.sc.log.imp.filt 
                         %>% mutate(Mean.abundance=rowMeans(dplyr::select(.,starts_with(c("Heavy","Light")))))
-                        %>% filter(Mean.abundance > -13.6)
+                        #%>% filter(Mean.abundance > -13.6)
+                        %>% filter(Mean.abundance > 0.25)
                         %>% dplyr::select(-Mean.abundance)
 )
 
-rownames(caeel.nsaf.log.imp.filt) <- caeel.nsaf.log.imp.filt$name 
-caeel.nsaf.log.imp.filt <- caeel.nsaf.log.imp.filt[,2:14]
+rownames(caeel.sc.log.imp.filt) <- caeel.sc.log.imp.filt$name 
+caeel.sc.log.imp.filt <- caeel.sc.log.imp.filt[,2:14]
 
 
-tech.rep.by.sample <- fct_collapse(colnames(caeel.nsaf.log.imp.filt),Light_1=c("Light_1"),
+tech.rep.by.sample <- fct_collapse(colnames(caeel.sc.log.imp.filt),Light_1=c("Light_1"),
                                   Light_2=c("Light_2","Light_3"),
                                   Light_3=c("Light_4","Light_5","Light_6","Light_7"),
                                   Heavy_1=c("Heavy_1"),
@@ -279,36 +279,36 @@ tech.rep.by.sample <- fct_collapse(colnames(caeel.nsaf.log.imp.filt),Light_1=c("
 
 
 
-cols <- colnames(caeel.nsaf.log.imp.filt)
+cols <- colnames(caeel.sc.log.imp.filt)
 sample.names <- unlist(strsplit(cols,split="_[0-9]"))
 f <- factor(cols,levels=cols,labels=sample.names)
 design <- model.matrix(~0+f)
 colnames(design) <- unique(sample.names)
 
-fit <- lmFit(caeel.nsaf.log.imp.filt,design)
-AW <- arrayWeights(caeel.nsaf.log.imp.filt, design)
-dupcor <- duplicateCorrelation(caeel.nsaf.log.imp.filt, design, block=tech.rep.by.sample) #correlation between technical replicates
+fit <- lmFit(caeel.sc.log.imp.filt,design)
+AW <- arrayWeights(caeel.sc.log.imp.filt, design)
+dupcor <- duplicateCorrelation(caeel.sc.log.imp.filt, design, block=tech.rep.by.sample) #correlation between technical replicates
 
-fit.w.weights <- lmFit(caeel.nsaf.log.imp.filt,design,block=tech.rep.by.sample,correlation = dupcor$consensus.correlation,weights = AW)
+fit.w.weights <- lmFit(caeel.sc.log.imp.filt,design,block=tech.rep.by.sample,correlation = dupcor$consensus.correlation,weights = AW)
 plotSA(fit.w.weights)
+
+resid <- residuals(fit,caeel.sc.log.imp.filt)
 ```
 
 Based on this plot, seems like our data matches the assumptions of limma. Now let's perform our differential expression analysis.
 
 ```{r limma,echo = FALSE,warning=F,message=FALSE,fig.width=6,fig.height=7}
-
+## Differential expression analysis following recommendation here: https://support.bioconductor.org/p/64484/
 cont.ev <- makeContrasts("Heavy-Light",levels=design)
 fit.ev.w.weights <- contrasts.fit(fit.w.weights,cont.ev)
 fit.ev.w.weights <- eBayes(fit.ev.w.weights,robust = T,trend=T)
 
 plotSA(fit.ev.w.weights)
-diff.exp.w.weights<- topTable(fit.ev.w.weights,number = nrow(caeel.nsaf.log.imp.filt))
-#diff.exp.top.w.weights<- diff.exp.w.weights[which(abs(diff.exp.w.weights$logFC) >= 1.5 & diff.exp.w.weights$adj.P.Val < 0.05),]
+diff.exp.w.weights<- topTable(fit.ev.w.weights,number = nrow(caeel.sc.log.imp.filt))
+
 diff.exp.top.w.weights<- diff.exp.w.weights %>% filter(abs(logFC) >= 1.5 & adj.P.Val < 0.05) %>% rownames_to_column("Protein")
 
-
-#diff.exp.top.w.weights <- merge(diff.exp.top.w.weights,caeel.nsaf,by=0)
-diff.exp.top.w.weights <- diff.exp.top.w.weights %>% left_join(caeel.nsaf.batch,by="Protein")
+diff.exp.top.w.weights <- diff.exp.top.w.weights %>% left_join(caeel.sc.batch,by="Protein")
 
 ```
 
@@ -346,7 +346,7 @@ enrichment@result$Gene_name <- unlist(lapply(str_split(enrichment@result$geneID,
         }
   ))
 
-write_tsv(enrichment@result,"Results/differentially_expressed_kegg_enrichment_20210901.tsv")
+write_tsv(enrichment@result,"Results/differentially_expressed_kegg_enrichment_sc_20211102.tsv")
 
 ## Enrichment of differentially expressed proteins up-regulated in Heavy EVs. Also include proteins unique to Heavy EVs.
 
@@ -362,7 +362,7 @@ heavy.enrichment@result$Gene_name <- unlist(lapply(str_split(heavy.enrichment@re
         }
   ))
 
-write_tsv(heavy.enrichment@result,"Results/heavy_fraction_upregulated_kegg_enrichment_20210901.tsv")
+write_tsv(heavy.enrichment@result,"Results/heavy_fraction_upregulated_kegg_enrichment_sc_20211102.tsv")
 
 ## Enrichment of differentially expressed proteins up-regulated in Light EVs. Also include proteins unique to Light EVs.
 
@@ -378,12 +378,12 @@ light.enrichment@result$Gene_name <- unlist(lapply(str_split(light.enrichment@re
         }
   ))
 
-write_tsv(light.enrichment@result,"Results/light_fraction_upregulated_kegg_enrichment_20210901.tsv")
+write_tsv(light.enrichment@result,"Results/light_fraction_upregulated_kegg_enrichment_sc_20211102.tsv")
 
 
 ## Enrichment of EV proteins relative to genomic background.
 
-all <- gene.to.kegg[rownames(caeel.nsaf),"KEGG_Gene_ID"]
+all <- gene.to.kegg[rownames(caeel.unique.sc),"KEGG_Gene_ID"]
 all.enrichment <- enrichKEGG(all,organism = "cel",pvalueCutoff = 0.05,pAdjustMethod = "BH",qvalueCutoff = 0.1)
 all.enrichment@result$Gene_name <- unlist(lapply(str_split(all.enrichment@result$geneID,"/"),function(x){
          tmp <- kegg.to.gene[x,"Gene_Symbol"]
@@ -392,7 +392,74 @@ all.enrichment@result$Gene_name <- unlist(lapply(str_split(all.enrichment@result
         }
   ))
 
-write_tsv(all.enrichment@result,"Results/evome_vs_background_kegg_enrichment_20210901.tsv")
+write_tsv(all.enrichment@result,"Results/evome_vs_background_kegg_enrichment_sc_20211102.tsv")
+
+
+```
+
+Reviewer requested that we perform the EVome enrichment against the background set that includes protein identified ambiguously, as well. Inna provided a list of proteins identified via ambiguous peptides. Results largely remain unchanged.
+
+```{r}
+ambiguous <- read_tsv("Data/ID_map/bioDBnet_db2db_2021_11_02.txt")
+ambiguous <- ambiguous %>% filter(`KEGG Gene ID` != "-") %>% mutate(`KEGG Gene ID` = str_remove(`KEGG Gene ID`,"cel:"))
+gene.universe.ambig <- unique(c(gene.universe,ambiguous$`KEGG Gene ID`))
+
+diff.exp.kegg.ids <- gene.to.kegg[diff.exp.top.w.weights$Protein,"KEGG_Gene_ID"]
+diff.exp.kegg.ids <- c(diff.exp.kegg.ids,only.heavy,only.light)
+
+enrichment.ambig <- enrichKEGG(diff.exp.kegg.ids,organism = "cel",pvalueCutoff = 0.05,pAdjustMethod = "BH",qvalueCutoff = 0.1,universe = gene.universe.ambig)
+
+enrichment.ambig@result$Gene_name <- unlist(lapply(str_split(enrichment.ambig@result$geneID,"/"),function(x){
+         tmp <- kegg.to.gene[x,"Gene_Symbol"]
+         tmp[which(is.na(tmp))] <- str_remove(x[which(is.na(tmp))],"CELE_")
+         paste(tmp,collapse=",")
+        }
+  ))
+
+write_tsv(enrichment.ambig@result,"Results/differentially_expressed_kegg_enrichment_sc_20211102_ambig_protein_background.tsv")
+
+## Enrichment of differentially expressed proteins up-regulated in Heavy EVs. Also include proteins unique to Heavy EVs.
+
+diff.exp.kegg.ids <- gene.to.kegg[diff.exp.top.w.weights[which(diff.exp.top.w.weights$logFC > 0),"Protein"],"KEGG_Gene_ID"]
+only.heavy.kegg <- gene.to.kegg[only.heavy,"KEGG_Gene_ID"]
+heavy.kegg <- c(only.heavy.kegg,diff.exp.kegg.ids)
+heavy.enrichment.ambig <- enrichKEGG(heavy.kegg,organism = "cel",pvalueCutoff = 0.05,pAdjustMethod = "BH",qvalueCutoff = 0.1,universe = gene.universe.ambig)
+
+heavy.enrichment.ambig@result$Gene_name <- unlist(lapply(str_split(heavy.enrichment.ambig@result$geneID,"/"),function(x){
+         tmp <- kegg.to.gene[x,"Gene_Symbol"]
+         tmp[which(is.na(tmp))] <- str_remove(x[which(is.na(tmp))],"CELE_")
+         paste(tmp,collapse=",")
+        }
+  ))
+
+write_tsv(heavy.enrichment.ambig@result,"Results/heavy_fraction_upregulated_kegg_enrichment_sc_20211102_ambig_protein_background.tsv")
+
+## Enrichment of differentially expressed proteins up-regulated in Light EVs. Also include proteins unique to Light EVs.
+
+diff.exp.kegg.ids <- gene.to.kegg[diff.exp.top.w.weights[which(diff.exp.top.w.weights$logFC < 0),"Protein"],"KEGG_Gene_ID"]
+only.light.kegg <- gene.to.kegg[only.light,"KEGG_Gene_ID"]
+light.kegg <- c(only.light.kegg,diff.exp.kegg.ids)
+light.enrichment.ambig <- enrichKEGG(light.kegg,organism = "cel",pvalueCutoff = 0.05,pAdjustMethod = "BH",qvalueCutoff = 0.1,universe = gene.universe.ambig)
+
+light.enrichment.ambig@result$Gene_name <- unlist(lapply(str_split(light.enrichment.ambig@result$geneID,"/"),function(x){
+         tmp <- kegg.to.gene[x,"Gene_Symbol"]
+         tmp[which(is.na(tmp))] <- str_remove(x[which(is.na(tmp))],"CELE_")
+         paste(tmp,collapse=",")
+        }
+  ))
+
+write_tsv(light.enrichment.ambig@result,"Results/light_fraction_upregulated_kegg_enrichment_sc_20211102_ambig_protein_background.tsv")
+
+
+all.enrichment.ambig <- enrichKEGG(gene.universe.ambig,organism = "cel",pvalueCutoff = 0.05,pAdjustMethod = "BH",qvalueCutoff = 0.1)
+all.enrichment.ambig@result$Gene_name <- unlist(lapply(str_split(all.enrichment.ambig@result$geneID,"/"),function(x){
+         tmp <- kegg.to.gene[x,"Gene_Symbol"]
+         tmp[which(is.na(tmp))] <- str_remove(x[which(is.na(tmp))],"CELE_")
+         paste(tmp,collapse=",")
+        }
+  ))
+
+write_tsv(all.enrichment.ambig@result,"Results/evome_vs_background_kegg_enrichment_sc_20211102_ambig_protein_background.tsv")
 
 
 ```
@@ -401,7 +468,7 @@ The following code was developed by Inna for performing enrichment tests of Inte
 
 ```{r echo = F}
 #Import domain info for the whole proteome (sourced from Ensembl Biomart)
-ElegansGenomeDomainInfo <- read.csv("Data/ElegansGenomeInterProInfo.csv")
+ElegansGenomeDomainInfo <- read.csv("Data/Domain/ElegansGenomeInterProInfo.csv")
 
 #Remove empty InterProID entries
 ElegansGenomeDomainInfo <- ElegansGenomeDomainInfo[-which(ElegansGenomeDomainInfo$Interpro.ID == ""), ]
@@ -418,13 +485,14 @@ a <- rle(sort(ElegansGenomeDomainInfo$Interpro.ID))
 BackgroundFrequencies <- data.frame(InterProDomain=a$values, BackgroundOccurence=a$lengths)
 
 #Import doamin info for the EVome (sourced from Ensembl Biomart)
-EVomeDomainInfo <- read.csv("Data/EVomeDomainInfo.csv")
+EVomeDomainInfo <- read.csv("Data/Domain/EVomeDomainInfo.csv")
 #Kill empty InterProID entries
 EVomeDomainInfo <- EVomeDomainInfo[-which(EVomeDomainInfo$Interpro.ID == ""), ]
 
 #Extract unique EV proteins to calculate the size of the EVome with assigned domains
 EVomeDomainProteinList <- unique(EVomeDomainInfo$Gene.stable.ID)
 length(EVomeDomainProteinList)
+
 
 #Calculate frequency of occurence for each domain
 b <- rle(sort(EVomeDomainInfo$Interpro.ID))
@@ -434,8 +502,8 @@ EVomeFrequencies <- data.frame(InterProDomain=b$values, EVomeOccurence=b$lengths
 Summary <- merge(EVomeFrequencies, BackgroundFrequencies, 
                                         by = "InterProDomain", 
                                         all.x=TRUE, all.y=FALSE)
-Summary$EVomeFrequency <- Summary$EVomeOccurence/2888
-Summary$ProteomeFrequency <- Summary$BackgroundOccurence/20191
+Summary$EVomeFrequency <- Summary$EVomeOccurence/length(EVomeDomainProteinList)
+Summary$ProteomeFrequency <- Summary$BackgroundOccurence/length(GlobalGeneList)
 Summary$Enrichment <- Summary$EVomeFrequency/Summary$ProteomeFrequency
 
 #Calculate p-value using hypergeometric distribution model
@@ -451,7 +519,7 @@ Summary$Enrichment <- Summary$EVomeFrequency/Summary$ProteomeFrequency
 
 
 ## For the enrichment test, we probably only want to include proteins with some form of annotation. Proteins with missing information are not particularly informative. You can also simplify your code slightly by setting lower.tail = F instead of subtracting from 1. 
-Summary$p_value_1 <- phyper(Summary$EVomeOccurence - 1,
+Summary$p_value <- phyper(Summary$EVomeOccurence - 1,
                                      Summary$BackgroundOccurence,
                             length(GlobalGeneList)-Summary$BackgroundOccurence,
                             length(EVomeDomainProteinList), lower.tail = F)
@@ -460,12 +528,10 @@ Summary$p_value_1 <- phyper(Summary$EVomeOccurence - 1,
 
 #Benjamini-Hochberg method to calculate p-adjusted
 Summary$padj <- p.adjust(Summary$p_value, method="BH")
-Summary$padj_1 <- p.adjust(Summary$p_value_1, method="BH")
 
 Summary$neglog10_padj <- -log10(Summary$padj) 
-Summary$neglog10_padj_1 <- -log10(Summary$padj_1) 
 
-Summary <- Summary %>% dplyr::select(-padj,-neglog10_padj) %>% rename(adjusted_pval=padj_1,negative_log10_adjusted_pval = neglog10_padj_1 )
+Summary <- Summary %>% rename(adjusted_pval=padj,negative_log10_adjusted_pval = neglog10_padj )
 
 SpC_byDomain <- EVomeDomainInfo %>%
   group_by(Interpro.ID) %>%
@@ -481,11 +547,104 @@ Summary <- merge(Summary, EVomeDomainInfo[,c("Interpro.ID","Interpro.Description
 
 Summary <- unique(Summary)
 Summary <- Summary %>% arrange(adjusted_pval)
-write_csv(Summary, "SummaryDomainEnrichment.csv")
+write_csv(Summary, "Results/SummaryDomainEnrichment_20211108.csv")
 
 
 ```
 
+As with the KEGG enrichments, we now want to include proteins that were ambiguous in our enrichments. 
+```{r echo = F}
 
 
+ambiguous <- read_tsv("Data/ProteinsIdentifiedUnambiguouslyOnly.tsv") %>% dplyr::select(Gene_name,`Wormbase IDs`)
+
+#Import domain info for the whole proteome (sourced from Ensembl Biomart)
+ElegansGenomeDomainInfo <- read.csv("Data/Domain/ElegansGenomeInterProInfo.csv")
+
+#Remove empty InterProID entries
+ElegansGenomeDomainInfo <- ElegansGenomeDomainInfo[-which(ElegansGenomeDomainInfo$Interpro.ID == ""), ]
+
+#Extarct domain IDs
+GlobalDomainList <- unique(ElegansGenomeDomainInfo$Interpro.ID)
+
+#Extract unique genes to calculate the size of the proteome
+GlobalGeneList <- unique(ElegansGenomeDomainInfo$Gene.stable.ID)
+length(GlobalGeneList)
+
+#Calculate frequency of occurence for each domain
+a <- rle(sort(ElegansGenomeDomainInfo$Interpro.ID))
+BackgroundFrequencies <- data.frame(InterProDomain=a$values, BackgroundOccurence=a$lengths)
+
+#Import doamin info for the EVome (sourced from Ensembl Biomart)
+EVomeDomainInfo <- read.csv("Data/Domain/EVomeDomainInfo.csv")
+#Kill empty InterProID entries
+EVomeDomainInfo <- EVomeDomainInfo[-which(EVomeDomainInfo$Interpro.ID == ""), ]
+ambiguousDomainInfo <- ElegansGenomeDomainInfo %>% filter(Gene.stable.ID %in% ambiguous$`Wormbase IDs`)
+
+
+
+EVomeDomainInfo <- list(EVomeDomainInfo,ambiguousDomainInfo) %>% bind_rows() %>% distinct(Gene.stable.ID,Interpro.ID,.keep_all = T)
+
+
+#Extract unique EV proteins to calculate the size of the EVome with assigned domains
+EVomeDomainProteinList <- unique(EVomeDomainInfo$Gene.stable.ID)
+length(EVomeDomainProteinList)
+
+#Calculate frequency of occurence for each domain
+b <- rle(sort(EVomeDomainInfo$Interpro.ID))
+EVomeFrequencies <- data.frame(InterProDomain=b$values, EVomeOccurence=b$lengths)
+
+#Generate data frame of EVome domain IDs with EVome and Background frequencies
+Summary <- merge(EVomeFrequencies, BackgroundFrequencies, 
+                                        by = "InterProDomain", 
+                                        all.x=TRUE, all.y=FALSE)
+Summary$EVomeFrequency <- Summary$EVomeOccurence/length(EVomeDomainProteinList)
+Summary$ProteomeFrequency <- Summary$BackgroundOccurence/length(GlobalGeneList)
+Summary$Enrichment <- Summary$EVomeFrequency/Summary$ProteomeFrequency
+
+#Calculate p-value using hypergeometric distribution model
+#EVome size = 2,888 proteins
+#Proteome size = 14,904 proteins
+#http://mengnote.blogspot.com/2012/12/calculate-correct-hypergeometric-p.html
+#phyper(success-in-sample, success-in-bkgd, failure-in-bkgd, sample-size)
+# 
+# Summary$p_value <- 1-phyper(Summary$EVomeOccurence-1, 
+#                                      Summary$BackgroundOccurence,
+#                             20191-Summary$BackgroundOccurence,
+#                             2888)
+
+
+## For the enrichment test, we probably only want to include proteins with some form of annotation. Proteins with missing information are not particularly informative. You can also simplify your code slightly by setting lower.tail = F instead of subtracting from 1. 
+Summary$p_value <- phyper(Summary$EVomeOccurence - 1,
+                                     Summary$BackgroundOccurence,
+                            length(GlobalGeneList)-Summary$BackgroundOccurence,
+                            length(EVomeDomainProteinList), lower.tail = F)
+
+
+
+#Benjamini-Hochberg method to calculate p-adjusted
+Summary$padj <- p.adjust(Summary$p_value, method="BH")
+
+Summary$neglog10_padj <- -log10(Summary$padj) 
+
+Summary <- Summary %>% rename(adjusted_pval=padj,negative_log10_adjusted_pval = neglog10_padj)
+
+SpC_byDomain <- EVomeDomainInfo %>%
+  group_by(Interpro.ID) %>%
+  summarise(SumCounts = sum(SpectralCounts,na.rm=T))
+
+Summary <- merge(Summary, SpC_byDomain, 
+                 by.x="InterProDomain", by.y="Interpro.ID",
+                 all.x=TRUE, all.y=FALSE)
+
+Summary <- merge(Summary, EVomeDomainInfo[,c("Interpro.ID","Interpro.Description")], 
+                 by.x="InterProDomain", by.y="Interpro.ID",
+                 all.x=TRUE, all.y=FALSE)
+
+Summary <- unique(Summary)
+Summary <- Summary %>% arrange(adjusted_pval)
+write_csv(Summary, "Results/SummaryDomainEnrichment_20211108_w_ambiguous.csv")
+
+
+```
 
